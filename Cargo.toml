@@ -40,7 +40,7 @@ toml = "1.1.3"
 # serde_yaml_ng is gone from this manifest: the workflow loader that parsed
 # YAML moved to jterm_core, which depends on the same parser, and no other
 # ember surface reads YAML.
-dirs = "6.0.0"
+dirs = "7.0.0"
 lru = "0.18"
 smallvec = "1.15"
 once_cell = "1.21"
