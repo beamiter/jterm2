@@ -238,16 +238,27 @@ impl super::TerminalState {
             // OSC 104/110/111/112 are valid without a
             // `;value` part — treat those as empty.
             if let Some((command, value)) = payload.split_once(';').or(Some((payload, ""))) {
-                if command == "0" || command == "2" {
+                if command == "0" || command == "1" || command == "2" {
                     // Bounded at ingest. The payload arrives from the pending
                     // escape buffer, which tolerates megabytes before it gives
                     // up, and the title is read back once per frame; an
                     // unbounded copy parked in terminal state is charged twice.
                     // The window-manager sanitiser downstream still caps the
                     // *displayed* title, but it can only cap what it is handed.
-                    self.window_title.clear();
-                    self.window_title
-                        .extend(value.chars().take(MAX_WINDOW_TITLE_CHARS));
+                    //
+                    // Per xterm: 0 sets both titles, 1 the icon title only,
+                    // 2 the window title only. The icon title is separate
+                    // because XTWINOPS reports and saves the two independently.
+                    if command != "1" {
+                        self.window_title.clear();
+                        self.window_title
+                            .extend(value.chars().take(MAX_WINDOW_TITLE_CHARS));
+                    }
+                    if command != "2" {
+                        self.icon_title.clear();
+                        self.icon_title
+                            .extend(value.chars().take(MAX_WINDOW_TITLE_CHARS));
+                    }
                 } else if command == "7" {
                     // OSC 7 — current working directory.
                     // Format: file://hostname/path (path is %-encoded).
@@ -1426,6 +1437,12 @@ impl super::TerminalState {
                     self.scroll_region_down(self.scroll_region_top, self.scroll_region_bottom);
                 }
             }
+            't' if private_prefix.is_none() && intermediates.is_empty() => {
+                // XTWINOPS - window manipulation. Only the reporting and
+                // title-stack ops; the mutating ones (resize/move/iconify) are
+                // deliberately ignored, as frost ignores them.
+                self.handle_window_ops(params);
+            }
             'n' => {
                 // DSR - Device Status Report
                 match params.first().copied().unwrap_or(0) {
@@ -2033,6 +2050,116 @@ impl super::TerminalState {
             *row_ver = self.grid_version;
         }
         self.dirty_region.mark_all(self.grid.rows());
+    }
+
+    /// A title on its way back out to the PTY, with anything that could break
+    /// the reply's own framing or reorder it removed. The ingest path caps
+    /// length; this caps what the bytes can *do*.
+    fn reportable_title(title: &str) -> String {
+        title
+            .chars()
+            .filter(|&ch| {
+                !ch.is_control()
+                    && !matches!(
+                        ch,
+                        '\u{061c}'
+                            | '\u{200e}'
+                            | '\u{200f}'
+                            | '\u{202a}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                    )
+            })
+            .take(MAX_WINDOW_TITLE_CHARS)
+            .collect()
+    }
+
+    /// XTWINOPS (`CSI Ps ; … t`), reporting ops and the title stack only.
+    ///
+    /// Dropping these entirely left two holes: a program probing cell geometry
+    /// with `CSI 18 t` — which is how several TUIs and image protocols size
+    /// themselves when they cannot ioctl the pty — got no reply, and the
+    /// `CSI 22 t` / `CSI 23 t` push-pop that shells and tmux use around a
+    /// command was a no-op, so the title stayed on whatever the last command
+    /// set it to.
+    fn handle_window_ops(&mut self, params: &[u16]) {
+        let op = params.first().copied().unwrap_or(0);
+        let rows = self.grid.rows();
+        let cols = self.grid.row_len();
+        match op {
+            // Report window state: normal/non-iconified.
+            11 => self.output_buffer.extend_from_slice(b"\x1b[1t"),
+            // Report window position. We do not track compositor coordinates,
+            // so report a stable origin, as frost does.
+            13 => self.output_buffer.extend_from_slice(b"\x1b[3;0;0t"),
+            // Report text area size in pixels, derived from the cell size the
+            // renderer keeps on the graphics state.
+            14 => {
+                let (cell_w, cell_h) = self.kitty_graphics.cell_size_pixels();
+                let response = format!(
+                    "\x1b[4;{};{}t",
+                    cell_h.saturating_mul(rows as u32),
+                    cell_w.saturating_mul(cols as u32)
+                );
+                self.output_buffer.extend(response.as_bytes());
+            }
+            // Report text area size in characters.
+            18 => {
+                let response = format!("\x1b[8;{rows};{cols}t");
+                self.output_buffer.extend(response.as_bytes());
+            }
+            // Report screen size in characters. Monitor geometry is not known
+            // here, so mirror the grid rather than invent numbers.
+            19 => {
+                let response = format!("\x1b[9;{rows};{cols}t");
+                self.output_buffer.extend(response.as_bytes());
+            }
+            // Report icon label / window title.
+            20 => {
+                let response = format!("\x1b]L{}\x1b\\", Self::reportable_title(&self.icon_title));
+                self.output_buffer.extend(response.as_bytes());
+            }
+            21 => {
+                let response =
+                    format!("\x1b]l{}\x1b\\", Self::reportable_title(&self.window_title));
+                self.output_buffer.extend(response.as_bytes());
+            }
+            // Save/restore titles. 1 = icon, 2 = window, anything else = both.
+            22 => self.save_titles(params.get(1).copied().unwrap_or(0)),
+            23 => self.restore_titles(params.get(1).copied().unwrap_or(0)),
+            _ => {}
+        }
+    }
+
+    fn save_titles(&mut self, target: u16) {
+        if self.title_stack.len() >= MAX_TITLE_STACK_DEPTH {
+            self.title_stack.remove(0);
+        }
+        match target {
+            1 => self.title_stack.push((Some(self.icon_title.clone()), None)),
+            2 => self
+                .title_stack
+                .push((None, Some(self.window_title.clone()))),
+            _ => self.title_stack.push((
+                Some(self.icon_title.clone()),
+                Some(self.window_title.clone()),
+            )),
+        }
+    }
+
+    fn restore_titles(&mut self, target: u16) {
+        let Some((icon_title, window_title)) = self.title_stack.pop() else {
+            return;
+        };
+        if target != 2 {
+            if let Some(icon_title) = icon_title {
+                self.icon_title = icon_title;
+            }
+        }
+        if target != 1 {
+            if let Some(window_title) = window_title {
+                self.window_title = window_title;
+            }
+        }
     }
 
     pub(super) fn set_mode(&mut self, mode: u16) {

@@ -11,7 +11,7 @@ use super::{
     TerminalCell, TerminalState, UnderlineStyle, FINISHED_OUTPUT_EVICTION_ROW_CHECKS,
     MAX_CAPTURED_COMMAND_OUTPUT_BYTES, MAX_COMMAND_MARKS, MAX_COMPLETED_COMMAND_OUTPUT_BYTES,
     MAX_OSC_133_COMMAND_BYTES, MAX_OSC_133_CWD_BYTES, MAX_OSC_133_ID_BYTES, MAX_PENDING_ESCAPE,
-    MAX_WINDOW_TITLE_CHARS,
+    MAX_TITLE_STACK_DEPTH, MAX_WINDOW_TITLE_CHARS,
 };
 
 fn emit_completed_block(terminal: &mut TerminalState, index: usize) -> u64 {
@@ -2931,6 +2931,91 @@ fn resize_does_not_yank_a_scrolled_back_reader_to_the_live_bottom() {
     // Growing taller must not either.
     terminal.on_resize(12, 8);
     assert_eq!(terminal.scroll_offset, 3);
+}
+
+/// XTWINOPS was dropped entirely: `CSI 18 t` is how several TUIs and image
+/// protocols size themselves when they cannot ioctl the pty, and the
+/// `CSI 22 t` / `CSI 23 t` push-pop is how shells and tmux annotate the title
+/// around a command. frost answers both; these pin ember to the same.
+#[test]
+fn xtwinops_reports_the_text_area_in_characters() {
+    let mut terminal = TerminalState::new(97, 31);
+
+    terminal.process_input(b"\x1b[18t");
+
+    assert_eq!(terminal.output_buffer.as_slice(), b"\x1b[8;31;97t");
+}
+
+#[test]
+fn xtwinops_reports_window_state_and_position() {
+    let mut terminal = TerminalState::new(20, 4);
+
+    terminal.process_input(b"\x1b[11t\x1b[13t");
+
+    assert_eq!(terminal.output_buffer.as_slice(), b"\x1b[1t\x1b[3;0;0t");
+}
+
+#[test]
+fn xtwinops_pushes_and_pops_the_title() {
+    let mut terminal = TerminalState::new(20, 4);
+    terminal.process_input(b"\x1b]2;before\x07");
+
+    terminal.process_input(b"\x1b[22;0t");
+    terminal.process_input(b"\x1b]2;during a command\x07");
+    assert_eq!(terminal.window_title, "during a command");
+
+    terminal.process_input(b"\x1b[23;0t");
+    assert_eq!(terminal.window_title, "before");
+}
+
+/// OSC 0 sets both titles, 1 the icon title, 2 the window title — which is what
+/// makes ops 20/21 and the stack meaningful.
+#[test]
+fn osc_title_commands_address_the_two_titles_separately() {
+    let mut terminal = TerminalState::new(20, 4);
+
+    terminal.process_input(b"\x1b]0;both\x07");
+    assert_eq!(terminal.window_title, "both");
+    assert_eq!(terminal.icon_title, "both");
+
+    terminal.process_input(b"\x1b]1;icon only\x07");
+    assert_eq!(terminal.window_title, "both");
+    assert_eq!(terminal.icon_title, "icon only");
+
+    terminal.process_input(b"\x1b]2;window only\x07");
+    assert_eq!(terminal.window_title, "window only");
+    assert_eq!(terminal.icon_title, "icon only");
+}
+
+/// A title report goes back out to the PTY, so it must not carry anything that
+/// could close the reply's own framing or reorder it.
+#[test]
+fn a_reported_title_cannot_break_its_own_framing() {
+    let mut terminal = TerminalState::new(20, 4);
+    terminal.process_input(b"\x1b]2;ok\x07");
+    terminal.window_title.push('\u{202e}');
+    terminal.window_title.push('\u{7}');
+
+    terminal.process_input(b"\x1b[21t");
+
+    assert_eq!(terminal.output_buffer.as_slice(), b"\x1b]lok\x1b\\");
+}
+
+/// The stack is depth-capped, so a program that only ever pushes cannot grow it
+/// without bound.
+#[test]
+fn the_title_stack_is_depth_capped() {
+    let mut terminal = TerminalState::new(20, 4);
+    for i in 0..(MAX_TITLE_STACK_DEPTH * 3) {
+        terminal.process_input(format!("\x1b]2;t{i}\x07").as_bytes());
+        terminal.process_input(b"\x1b[22;0t");
+    }
+
+    // Popping more than the cap must not panic and must not restore garbage.
+    for _ in 0..(MAX_TITLE_STACK_DEPTH * 3) {
+        terminal.process_input(b"\x1b[23;0t");
+    }
+    assert!(terminal.window_title.starts_with('t'));
 }
 
 /// `CSI 5 n` is the standard liveness probe. Answering nothing makes the caller

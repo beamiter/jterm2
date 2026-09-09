@@ -339,6 +339,8 @@ impl super::TerminalState {
             current_bg: Color::Default,
             current_flags: StyleFlags::default(),
             window_title: String::new(),
+            icon_title: String::new(),
+            title_stack: Vec::new(),
             announced_jsh_session_id: None,
             current_working_dir: None,
             global_bg: Color::Default,
