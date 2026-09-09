@@ -29,10 +29,13 @@ pub(crate) const MAX_REMOTE_HOSTS: usize = 128;
 /// visible with its retained-but-unavailable diagnosis.
 pub(crate) const MAX_REMOTE_HOST_UI_ROWS: usize = 256;
 
-// Nerd Font priority list
+// Nerd Font priority list. The head is what `default_font_family` ships, so it
+// must stay a `Mono` cut: those hold every icon to one cell, which is the only
+// shape that lines up in a terminal grid.
 const NERD_FONT_CANDIDATES: &[&str] = &[
-    "SauceCodePro Nerd Font",
+    "JetBrainsMono Nerd Font Mono",
     "SauceCodePro Nerd Font Mono",
+    "SauceCodePro Nerd Font",
     "Monokoi Nerd Font",
     "Monokoi Nerd Font Mono",
     "JetBrains Mono Nerd Font",

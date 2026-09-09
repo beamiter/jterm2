@@ -223,6 +223,31 @@ fn fontconfig_match_file(_family: &str) -> Option<String> {
     None
 }
 
+/// Resolve `family` to a file, but only when fontconfig really has that family.
+///
+/// `fc-match` always answers with *something*, so an unverified lookup for a
+/// font that is not installed quietly returns the default monospace file. In a
+/// fallback stack that is worse than no answer: the substitute takes the slot
+/// the icon or CJK font was meant to fill, and every glyph it lacks falls
+/// through to whatever fontconfig happens to sort next.
+#[cfg(target_os = "linux")]
+fn fontconfig_match_family_file(family: &str) -> Option<String> {
+    let output = jterm_core::helper::fc_match(&["-f", "%{family}\t%{file}\n", family]).ok()?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let (families, path) = stdout.lines().find_map(|line| line.split_once('\t'))?;
+    let wanted = family.trim();
+    families
+        .split(',')
+        .any(|candidate| candidate.trim().eq_ignore_ascii_case(wanted))
+        .then(|| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fontconfig_match_family_file(_family: &str) -> Option<String> {
+    None
+}
+
 #[cfg(not(target_os = "linux"))]
 fn fontconfig_match_bold_file(_family: &str) -> Option<String> {
     None
@@ -308,7 +333,10 @@ fn load_matching_fallback_fonts(
     let mut resolved_paths = Vec::new();
 
     for family in family_candidates {
-        if let Some(path) = fontconfig_match_file(family) {
+        // Verified: an unavailable fallback must drop out of the stack
+        // rather than be replaced by a substitute that has none of the
+        // glyphs this slot exists to supply.
+        if let Some(path) = fontconfig_match_family_file(family) {
             if seen_paths.insert(path.clone()) {
                 resolved_paths.push(path);
             }
@@ -485,8 +513,15 @@ fn configure_fonts_and_gpu(
         &mut fonts,
         &mut loaded_font_paths,
         &[
+            // Nerd Fonts' icon-only cuts exist to be somebody's fallback, so
+            // they come first; the patched text fonts carry the same icon set
+            // and stand in when no Symbols cut is installed.
             "Symbols Nerd Font Mono",
             "Symbols Nerd Font",
+            "JetBrainsMono Nerd Font Mono",
+            "SauceCodePro Nerd Font Mono",
+            "JetBrainsMono Nerd Font",
+            "SauceCodePro Nerd Font",
             "Noto Sans Symbols 2",
             "Noto Sans Symbols",
             "DejaVu Sans",
@@ -7212,9 +7247,9 @@ mod tests {
         bounded_wheel_step_accumulate, captured_release_button, clipboard_5522_response_for_mime,
         clipboard_5522_response_for_mime_with_limit, desktop_notification_channel,
         encode_submitted_command, ensure_direct_paste_route_available,
-        flush_pending_mouse_controls, kitty_graphics_payload, link_activation_dragged,
-        link_activation_ready, link_activation_release_allowed, link_at_pointer,
-        maybe_notify_long_command, mouse_capture_accepts_new_press,
+        flush_pending_mouse_controls, fontconfig_match_family_file, kitty_graphics_payload,
+        link_activation_dragged, link_activation_ready, link_activation_release_allowed,
+        link_at_pointer, maybe_notify_long_command, mouse_capture_accepts_new_press,
         mouse_cell_for_current_dimensions, mouse_lossy_reports_allowed, mouse_press_reports_to_app,
         mouse_protocol_input_is_blocked, mouse_sequence_allows_lossy, mouse_sequence_is_complete,
         normalized_paste_body, osc52_clipboard_response_with_limit, osc52_read_rate_limit_allows,
@@ -8738,5 +8773,19 @@ mod tests {
             &mut state
         ));
         assert_eq!(release_frame.len(), 1);
+    }
+
+    /// A fallback slot must stay empty when its font is missing.
+    ///
+    /// `fc-match` answers every query with *something*, so the unverified
+    /// lookup hands back the default monospace file for a font nobody
+    /// installed. That substitute would then occupy the icon or CJK slot while
+    /// carrying none of the glyphs the slot exists to supply.
+    #[test]
+    fn a_missing_family_resolves_to_nothing_rather_than_a_substitute() {
+        assert_eq!(
+            fontconfig_match_family_file("Definitely Not An Installed Family 4f2b"),
+            None
+        );
     }
 }
