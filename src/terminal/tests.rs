@@ -2907,6 +2907,53 @@ fn leaving_the_alt_screen_restores_the_shells_sgr_rather_than_clearing_it() {
     assert_eq!(terminal.current_flags, StyleFlags::default());
 }
 
+/// A resize is a window drag, a pane split or a font change — never a request
+/// to leave the history the reader is in. The shrink path deliberately pins the
+/// offset as it evicts rows; the tail of on_resize used to throw that away.
+#[test]
+fn resize_does_not_yank_a_scrolled_back_reader_to_the_live_bottom() {
+    fn tagged_line(tag: char) -> ScrollbackLine {
+        let mut cells = vec![TerminalCell::default(); 8];
+        cells[0].character = tag;
+        ScrollbackLine::compress(&cells, false)
+    }
+
+    let mut terminal = TerminalState::new(8, 6);
+    for tag in ['A', 'B', 'C', 'D', 'E'] {
+        terminal.push_scrollback_compressed(tagged_line(tag));
+    }
+    terminal.scroll_offset = 3;
+
+    // A width-only change must not move the reader at all.
+    terminal.on_resize(12, 6);
+    assert_eq!(terminal.scroll_offset, 3);
+
+    // Growing taller must not either.
+    terminal.on_resize(12, 8);
+    assert_eq!(terminal.scroll_offset, 3);
+}
+
+/// `CSI 5 n` is the standard liveness probe. Answering nothing makes the caller
+/// wait out its own timeout; frost answers it, and these two must agree.
+#[test]
+fn dsr_5_reports_the_terminal_as_ok() {
+    let mut terminal = TerminalState::new(20, 4);
+
+    terminal.process_input(b"\x1b[5n");
+
+    assert_eq!(terminal.output_buffer.as_slice(), b"\x1b[0n");
+}
+
+#[test]
+fn dsr_6_still_reports_the_cursor_position() {
+    let mut terminal = TerminalState::new(20, 4);
+    terminal.process_input(b"\x1b[2;3H");
+
+    terminal.process_input(b"\x1b[6n");
+
+    assert_eq!(terminal.output_buffer.as_slice(), b"\x1b[2;3R");
+}
+
 /// terminfo hands every child `rep`, `cht` and `cbt` for the TERM we set, so a
 /// dispatch that drops CSI b / CSI I / CSI Z renders runs, tab jumps and
 /// back-tabs wrong. frost implements all three; these pin ember to the same.

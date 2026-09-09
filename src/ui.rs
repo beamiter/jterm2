@@ -4150,7 +4150,17 @@ impl TerminalRenderer {
             .dynamic_bg
             .map(|(r, g, b)| egui::Color32::from_rgb(r, g, b))
             .unwrap_or_else(|| self.theme.terminal_background());
-        let has_search = !search_state.matches.is_empty() && !search_state.query.is_empty();
+        // Gate on is_open. `SearchState::close` deliberately keeps `matches`
+        // and `query` (so reopening restores the last search), so deriving this
+        // from them alone meant that after one search, every later frame for
+        // the rest of the session paid the whole overlay cost — an O(all
+        // matches) projection walk and a hash of the entire match list — to
+        // paint highlights the user had closed. And because closing changed
+        // neither field, the dirty hash was unchanged, so the stale highlights
+        // never cleared either.
+        let has_search = search_state.is_open
+            && !search_state.matches.is_empty()
+            && !search_state.query.is_empty();
         let target_cell_width = char_width * ppp;
         let target_cell_height = line_height * ppp;
         let font_generation_before = {
@@ -4176,13 +4186,21 @@ impl TerminalRenderer {
         let current_projection_layout_key = current_projection_key.layout_key();
         let current_selection = terminal.selection;
         let current_selection_revision = terminal.selection_revision();
-        let search_hash = {
+        // Hashing the whole match list every frame is the other half of the
+        // closed-panel cost: a query like "e" over a large scrollback yields
+        // tens of thousands of matches. With the panel shut the overlay cannot
+        // be drawn at all, so a constant is the correct key — and it differs
+        // from any open-panel hash, so closing the panel dirties the rows once
+        // and the stale highlights actually clear.
+        let search_hash = if has_search {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             search_state.query.hash(&mut h);
             search_state.matches.hash(&mut h);
             search_state.current_match_index.hash(&mut h);
             h.finish()
+        } else {
+            0
         };
         let block_backdrop_hash = {
             use std::hash::{Hash, Hasher};
@@ -4875,7 +4893,17 @@ impl TerminalRenderer {
         char_width: f32,
         line_height: f32,
     ) {
-        let has_search = !search_state.matches.is_empty() && !search_state.query.is_empty();
+        // Gate on is_open. `SearchState::close` deliberately keeps `matches`
+        // and `query` (so reopening restores the last search), so deriving this
+        // from them alone meant that after one search, every later frame for
+        // the rest of the session paid the whole overlay cost — an O(all
+        // matches) projection walk and a hash of the entire match list — to
+        // paint highlights the user had closed. And because closing changed
+        // neither field, the dirty hash was unchanged, so the stale highlights
+        // never cleared either.
+        let has_search = search_state.is_open
+            && !search_state.matches.is_empty()
+            && !search_state.query.is_empty();
         let search_map = if has_search {
             viewport_search_map(terminal, viewport, &search_state.matches, rows)
         } else {

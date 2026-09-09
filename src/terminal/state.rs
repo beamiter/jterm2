@@ -6952,7 +6952,13 @@ impl super::TerminalState {
         self.row_versions.fill(self.grid_version);
         self.dirty_region.mark_all(rows);
 
-        self.scroll_offset = 0;
+        // Clamp, do not zero. A resize is a window drag, a pane split, a font
+        // change or a sidebar toggle — none of them is a request to leave the
+        // history the user is reading. The shrink branch above deliberately
+        // routes its evicted rows through the pinning push, which increments
+        // scroll_offset so the top anchor row does not move; zeroing here threw
+        // that away. frost pins the offset across a resize for the same reason.
+        self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
         self.pending_wrap = false;
         self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));

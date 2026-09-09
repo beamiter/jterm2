@@ -1428,16 +1428,25 @@ impl super::TerminalState {
             }
             'n' => {
                 // DSR - Device Status Report
-                // ESC[6n requests cursor position
-                if params.first().copied().unwrap_or(0) == 6 {
-                    // Respond with CPR (Cursor Position Report): ESC[row;colR
-                    // Row and Col are 1-indexed
-                    let row = (self.cursor_row + 1) as u16;
-                    let col = (self.cursor_col + 1) as u16;
+                match params.first().copied().unwrap_or(0) {
+                    5 => {
+                        // ESC[5n asks whether the terminal is OK. This is the
+                        // standard liveness probe: a caller sends it before
+                        // committing to an interactive mode and blocks on the
+                        // reply, so answering nothing costs it a timeout.
+                        self.output_buffer.extend_from_slice(b"\x1b[0n");
+                    }
+                    6 => {
+                        // Respond with CPR (Cursor Position Report): ESC[row;colR
+                        // Row and Col are 1-indexed
+                        let row = (self.cursor_row + 1) as u16;
+                        let col = (self.cursor_col + 1) as u16;
 
-                    // Send cursor position response back to PTY
-                    let response = format!("\x1b[{};{}R", row, col);
-                    self.output_buffer.extend(response.as_bytes());
+                        // Send cursor position response back to PTY
+                        let response = format!("\x1b[{};{}R", row, col);
+                        self.output_buffer.extend(response.as_bytes());
+                    }
+                    _ => {}
                 }
             }
             'c' => {
