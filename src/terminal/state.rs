@@ -222,6 +222,18 @@ impl super::TerminalState {
         cols.saturating_sub(1)
     }
 
+    /// 从给定列出发,返回严格左侧的上一个制表位(无则停在第 0 列)。
+    pub(super) fn prev_tab_stop(&self, col: usize) -> usize {
+        let mut c = col;
+        while c > 0 {
+            c -= 1;
+            if self.tab_stops.get(c).copied().unwrap_or(false) {
+                return c;
+            }
+        }
+        0
+    }
+
     /// DECSC / CSI s:保存完整光标状态(含 SGR、字符集、模式)。
     pub(super) fn save_cursor_state(&mut self) {
         self.saved_state = Some(SavedCursorState {
@@ -317,7 +329,9 @@ impl super::TerminalState {
             alt_cursor_col: 0,
             cursor_shape: CursorShape::default(),
             saved_state: None,
+            saved_primary_screen_state: None,
             insert_mode: false,
+            last_printed_char: None,
             origin_mode: false,
             tab_stops: Self::default_tab_stops(cols),
             pending_wrap: false,
@@ -1001,6 +1015,7 @@ impl super::TerminalState {
             output_col,
             output_col.saturating_add(width),
         );
+        self.last_printed_char = Some(_orig_ch);
     }
 
     pub(super) fn put_ascii_run(&mut self, bytes: &[u8]) {
@@ -1079,6 +1094,10 @@ impl super::TerminalState {
                     self.pending_wrap = true;
                 }
             }
+        }
+        // The fast path bypasses put_char, so REP's target is recorded here too.
+        if let Some(&last) = bytes.last() {
+            self.last_printed_char = Some(last as char);
         }
     }
 
@@ -1341,6 +1360,18 @@ impl super::TerminalState {
         }
         self.scrollback.push_back(line);
         self.total_lines_scrolled = self.total_lines_scrolled.saturating_add(1);
+        // Pin the viewport while the user is reading history. `scroll_offset`
+        // is a distance from the BOTTOM of scrollback, so every push moves the
+        // text under a stationary offset: start_idx = scrollback.len() -
+        // (scroll_offset + rows) drifts by one row per line, and a build or a
+        // tail walks the reader back to the live edge one line at a time.
+        // Past the scrollback cap the increment is still right — eviction
+        // shifts content indices down by one while len() stays put — and the
+        // clamp only bites when the reader is already at the very top, where
+        // the line they were looking at has genuinely been evicted.
+        if self.scroll_offset > 0 {
+            self.scroll_offset = (self.scroll_offset + 1).min(self.scrollback.len());
+        }
         self.mark_row_identity_changed_preserving_scroll_journal();
         self.invalidate_scrollback_view_cache();
     }

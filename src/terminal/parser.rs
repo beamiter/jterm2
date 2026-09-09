@@ -1635,6 +1635,35 @@ impl super::TerminalState {
                     };
                 }
             }
+            'I' => {
+                // CHT - cursor forward tabulation (n tab stops)
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                for _ in 0..n {
+                    self.cursor_col = self.next_tab_stop(self.cursor_col);
+                }
+            }
+            'Z' => {
+                // CBT - cursor backward tabulation (n tab stops). terminfo
+                // advertises cbt=\E[Z for the TERM we hand every child, so
+                // back-tab is reached by any form or menu that uses it.
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                for _ in 0..n {
+                    self.cursor_col = self.prev_tab_stop(self.cursor_col);
+                }
+            }
+            'b' => {
+                // REP - repeat the last graphic character n times. terminfo's
+                // rep=%p1%c\E[%p2%{1}%-%db writes the glyph once and asks for
+                // the remaining n-1 here, so dropping this arm renders a run of
+                // identical cells — a rule, a bar, a box border — as one glyph
+                // followed by blanks.
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                if let Some(ch) = self.last_printed_char {
+                    for _ in 0..n {
+                        self.put_char(ch);
+                    }
+                }
+            }
             'g' => {
                 // TBC - Tab Clear
                 match params.first().copied().unwrap_or(0) {
@@ -1881,6 +1910,21 @@ impl super::TerminalState {
         if save_cursor {
             self.saved_cursor_row = self.cursor_row;
             self.saved_cursor_col = self.cursor_col;
+            // Snapshot the whole drawing state, not just the cursor: exiting
+            // restores it instead of zeroing SGR.
+            self.saved_primary_screen_state = Some(SavedCursorState {
+                row: self.cursor_row,
+                col: self.cursor_col,
+                fg: self.current_fg,
+                bg: self.current_bg,
+                flags: self.current_flags,
+                g0: self.g0_charset,
+                g1: self.g1_charset,
+                active: self.active_charset,
+                origin_mode: self.origin_mode,
+                autowrap: self.modes.contains(&7),
+                pending_wrap: self.pending_wrap,
+            });
         }
         // 备用屏不显示 scrollback
         self.scroll_offset = 0;
@@ -1898,6 +1942,14 @@ impl super::TerminalState {
             &mut self.alt_keyboard_enhancement_stack,
         );
         self.use_alt_buffer = true;
+        // Retained cells keep their own keys, but an unterminated primary-screen
+        // OSC 8 link must not arm alternate-screen text.
+        self.current_hyperlink = HyperlinkId::NONE;
+        // DECSTBM is per-buffer. Carrying the primary screen's partial scroll
+        // region into the alternate buffer makes a TUI that never issues its
+        // own DECSTBM draw inside somebody else's region.
+        self.scroll_region_top = 0;
+        self.scroll_region_bottom = self.grid.rows().saturating_sub(1);
         if clear {
             self.clear_screen();
             // ED2 only removes placements intersecting the visible viewport so
@@ -1933,12 +1985,38 @@ impl super::TerminalState {
             &mut self.alt_keyboard_enhancement_stack,
         );
         self.use_alt_buffer = false;
+        // Alt-screen OSC 8 state never leaks back onto newly printed
+        // primary-screen cells, and the alt buffer's scroll region does not
+        // carry back into the main one.
+        self.current_hyperlink = HyperlinkId::NONE;
+        self.scroll_region_top = 0;
+        self.scroll_region_bottom = self.grid.rows().saturating_sub(1);
 
-        // 重置 SGR 属性,防止备用屏颜色泄漏到主屏
-        self.current_fg = Color::Default;
-        self.current_bg = Color::Default;
-        self.global_bg = Color::Default;
-        self.current_flags = StyleFlags::default();
+        // Restore the primary screen's drawing state rather than zeroing it:
+        // the shell's own SGR, charsets and modes were in force before the
+        // fullscreen app started and must be in force again after it exits.
+        // Falling back to Default keeps 1047-style entries (no save) safe.
+        if let Some(saved) = self.saved_primary_screen_state.take() {
+            self.current_fg = saved.fg;
+            self.current_bg = saved.bg;
+            self.global_bg = saved.bg;
+            self.current_flags = saved.flags;
+            self.g0_charset = saved.g0;
+            self.g1_charset = saved.g1;
+            self.active_charset = saved.active;
+            self.origin_mode = saved.origin_mode;
+            if saved.autowrap {
+                self.modes.insert(7);
+            } else {
+                self.modes.remove(&7);
+            }
+        } else {
+            self.current_fg = Color::Default;
+            self.current_bg = Color::Default;
+            self.global_bg = Color::Default;
+            self.current_flags = StyleFlags::default();
+        }
+        self.pending_wrap = false;
 
         // 交换缓冲后强制整屏重绘(+rows+1 触发 ui.rs 的 grid_version_jumped)
         self.grid_version += self.grid.rows() as u64 + 1;

@@ -532,8 +532,16 @@ pub struct TerminalState {
 
     // DECSC/DECRC 完整保存状态
     saved_state: Option<SavedCursorState>,
+    /// The primary screen's drawing state, snapshotted on the way into the
+    /// alternate buffer so leaving it restores what the shell had rather than
+    /// zeroing SGR. `printf '\e[31m'; vim` must come back red, as it does in
+    /// VTE and in frost.
+    saved_primary_screen_state: Option<SavedCursorState>,
     // IRM 插入模式 (ANSI mode 4):写字符时右移而非覆盖
     insert_mode: bool,
+    /// The last graphic character written, kept pre-translation so REP
+    /// (`CSI Pn b`) can reprint it through the charset in force at repeat time.
+    last_printed_char: Option<char>,
     // DECOM 原点模式 (DEC private ?6):光标寻址相对滚动区域顶端
     origin_mode: bool,
     // 自定义制表位 (HTS/TBC),index 为列,true 表示该列是制表位

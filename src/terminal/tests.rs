@@ -7,8 +7,8 @@ use super::state::{
 use super::{
     ClipboardReadKind, ClipboardReadRequest, Color, CommandState, DisplayPoint, ExtractedText,
     HistoryProjection, HyperlinkId, ProjectedBufferAnchorLocation, ProjectedRowKind,
-    ProjectionPolicy, ProjectionViewState, RawCellAnchor, RawRowId, ScrollbackLine, TerminalCell,
-    TerminalState, UnderlineStyle, FINISHED_OUTPUT_EVICTION_ROW_CHECKS,
+    ProjectionPolicy, ProjectionViewState, RawCellAnchor, RawRowId, ScrollbackLine, StyleFlags,
+    TerminalCell, TerminalState, UnderlineStyle, FINISHED_OUTPUT_EVICTION_ROW_CHECKS,
     MAX_CAPTURED_COMMAND_OUTPUT_BYTES, MAX_COMMAND_MARKS, MAX_COMPLETED_COMMAND_OUTPUT_BYTES,
     MAX_OSC_133_COMMAND_BYTES, MAX_OSC_133_CWD_BYTES, MAX_OSC_133_ID_BYTES, MAX_PENDING_ESCAPE,
     MAX_WINDOW_TITLE_CHARS,
@@ -2569,7 +2569,11 @@ fn projected_viewport_cache_invalidates_on_scrollback_only_mutation() {
         &before.cells_arc(),
         &after.cells_arc()
     ));
-    assert_eq!(after.cells()[0][0].character, 'B');
+    // Identity projection is the default state of block mode, so it drifts with
+    // the plain view and is pinned with it: 'A' holds row 0, 'B' lands below.
+    assert_eq!(terminal.scroll_offset, 2);
+    assert_eq!(after.cells()[0][0].character, 'A');
+    assert_eq!(after.cells()[1][0].character, 'B');
 }
 
 #[test]
@@ -2846,15 +2850,151 @@ fn appending_scrollback_invalidates_a_cached_historical_viewport() {
     let before = terminal.get_visible_cells();
     assert_eq!(before[0][0].character, 'B');
 
-    // Keep grid_version and scroll_offset unchanged: only explicit scrollback
-    // cache invalidation can make the newly appended tail visible here.
+    // Keep grid_version unchanged: only explicit scrollback cache invalidation
+    // can make the newly appended tail visible here.
     let version = terminal.grid_version;
     terminal.push_scrollback_compressed(tagged_line('C'));
     assert_eq!(terminal.grid_version, version);
     let after = terminal.get_visible_cells();
 
     assert!(!std::sync::Arc::ptr_eq(&before, &after));
-    assert_eq!(after[0][0].character, 'C');
+    // The push pins the viewport, so the row being read stays where it was and
+    // the new line appears below it. Before the pin this asserted 'C' at row 0
+    // — the reader's text sliding off the top is exactly the bug.
+    assert_eq!(terminal.scroll_offset, 2);
+    assert_eq!(after[0][0].character, 'B');
+    assert_eq!(after[1][0].character, 'C');
+}
+
+/// The alternate buffer is a separate screen, not a costume: DECSTBM and the
+/// active OSC 8 link belong to whichever buffer set them, and leaving restores
+/// the primary screen's drawing state rather than zeroing it.
+#[test]
+fn alt_screen_does_not_inherit_or_export_the_scroll_region() {
+    let mut terminal = TerminalState::new(20, 10);
+    terminal.process_input(b"\x1b[3;7r");
+    assert_eq!(
+        (terminal.scroll_region_top, terminal.scroll_region_bottom),
+        (2, 6)
+    );
+
+    terminal.process_input(b"\x1b[?1049h");
+    assert_eq!(
+        (terminal.scroll_region_top, terminal.scroll_region_bottom),
+        (0, 9)
+    );
+
+    terminal.process_input(b"\x1b[2;4r");
+    terminal.process_input(b"\x1b[?1049l");
+    assert_eq!(
+        (terminal.scroll_region_top, terminal.scroll_region_bottom),
+        (0, 9)
+    );
+}
+
+#[test]
+fn leaving_the_alt_screen_restores_the_shells_sgr_rather_than_clearing_it() {
+    let mut terminal = TerminalState::new(20, 4);
+    // The shell sets red before launching a fullscreen app.
+    terminal.process_input(b"\x1b[31m");
+    let shell_fg = terminal.current_fg;
+
+    terminal.process_input(b"\x1b[?1049h\x1b[44m\x1b[1m");
+    terminal.process_input(b"\x1b[?1049l");
+
+    assert_eq!(terminal.current_fg, shell_fg);
+    assert_eq!(terminal.current_bg, Color::Default);
+    assert_eq!(terminal.current_flags, StyleFlags::default());
+}
+
+/// terminfo hands every child `rep`, `cht` and `cbt` for the TERM we set, so a
+/// dispatch that drops CSI b / CSI I / CSI Z renders runs, tab jumps and
+/// back-tabs wrong. frost implements all three; these pin ember to the same.
+#[test]
+fn rep_repeats_the_last_graphic_character() {
+    let mut terminal = TerminalState::new(10, 2);
+
+    // What ncurses actually emits for a 5-wide rule: the glyph, then CSI 4 b.
+    terminal.process_input(b"-\x1b[4b");
+
+    let row: String = terminal.get_visible_cells()[0][..5]
+        .iter()
+        .map(|cell| cell.character)
+        .collect();
+    assert_eq!(row, "-----");
+}
+
+#[test]
+fn rep_without_a_preceding_glyph_is_ignored() {
+    let mut terminal = TerminalState::new(10, 2);
+
+    terminal.process_input(b"\x1b[4b");
+
+    assert_eq!(terminal.cursor_col, 0);
+    assert_eq!(terminal.get_visible_cells()[0][0].character, ' ');
+}
+
+#[test]
+fn cht_and_cbt_walk_the_tab_stops() {
+    let mut terminal = TerminalState::new(40, 2);
+
+    // Default stops every 8 columns.
+    terminal.process_input(b"\x1b[3I");
+    assert_eq!(terminal.cursor_col, 24);
+
+    terminal.process_input(b"\x1b[2Z");
+    assert_eq!(terminal.cursor_col, 8);
+
+    // Back-tab saturates at column 0 rather than wrapping.
+    terminal.process_input(b"\x1b[9Z");
+    assert_eq!(terminal.cursor_col, 0);
+}
+
+/// While the user reads history, streaming output must not walk the viewport
+/// back toward the live tail. `scroll_offset` is a distance from the bottom of
+/// scrollback, so a stationary offset means a moving view: one row per line of
+/// output. frost pinned this in 231f823; this is the same guarantee for ember.
+#[test]
+fn scrollback_viewport_is_pinned_when_new_output_arrives() {
+    fn tagged_line(tag: char) -> ScrollbackLine {
+        let mut cells = vec![TerminalCell::default(); 4];
+        cells[0].character = tag;
+        ScrollbackLine::compress(&cells, false)
+    }
+
+    let mut terminal = TerminalState::new(4, 2);
+    for tag in ['A', 'B', 'C', 'D'] {
+        terminal.push_scrollback_compressed(tagged_line(tag));
+    }
+    terminal.scroll_offset = 3;
+    let top_before = terminal.get_visible_cells()[0][0].character;
+    assert_eq!(top_before, 'B');
+
+    for tag in ['E', 'F', 'G'] {
+        terminal.push_scrollback_compressed(tagged_line(tag));
+    }
+
+    assert_eq!(terminal.scroll_offset, 6);
+    assert_eq!(terminal.get_visible_cells()[0][0].character, top_before);
+}
+
+/// A reader sitting at the live tail must keep following it — the pin applies
+/// only while scrolled back.
+#[test]
+fn a_viewport_at_the_live_tail_is_not_pinned() {
+    fn tagged_line(tag: char) -> ScrollbackLine {
+        let mut cells = vec![TerminalCell::default(); 4];
+        cells[0].character = tag;
+        ScrollbackLine::compress(&cells, false)
+    }
+
+    let mut terminal = TerminalState::new(4, 2);
+    terminal.push_scrollback_compressed(tagged_line('A'));
+    assert_eq!(terminal.scroll_offset, 0);
+
+    terminal.push_scrollback_compressed(tagged_line('B'));
+
+    assert_eq!(terminal.scroll_offset, 0);
 }
 
 #[test]

@@ -914,11 +914,16 @@ impl Config {
             ));
         }
 
+        // Bound this the way the Advanced tab's slider and frost both do
+        // (1..=10). egui clamps a slider to its own range and writes the
+        // clamped value back without marking the response changed, so a wider
+        // clamp here means a hand-edited value survives load and is then
+        // silently rewritten the first time the user opens that tab and saves.
         let old_scroll_speed = self.scroll_speed;
-        self.scroll_speed = self.scroll_speed.clamp(1, 50);
+        self.scroll_speed = self.scroll_speed.clamp(1, 10);
         if self.scroll_speed != old_scroll_speed {
             warnings.push(format!(
-                "scroll_speed={} is outside 1..=50; using {}",
+                "scroll_speed={} is outside 1..=10; using {}",
                 old_scroll_speed, self.scroll_speed
             ));
         }
