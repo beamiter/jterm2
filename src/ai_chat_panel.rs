@@ -518,11 +518,16 @@ impl AiChatPanel {
         let cancellation = AiCancellationToken::new();
         let worker_token = cancellation.clone();
         let tx = self.worker_tx.clone();
+        // Deltas are a live preview only — `Done` carries the full answer either
+        // way — so the blocking path just skips them. Without this branch an
+        // endpoint that cannot stream leaves the panel with no way to get a
+        // reply at all, which is what the other three terminals let a user fix.
+        let stream = config.ai_stream;
         let spawn = std::thread::Builder::new()
             .name("ember-ai-chat".to_string())
             .spawn(move || {
-                let result = client
-                    .send_turns_streaming_cancellable(
+                let result = if stream {
+                    client.send_turns_streaming_cancellable(
                         Some(&system),
                         &request_history,
                         &worker_token,
@@ -535,7 +540,14 @@ impl AiChatPanel {
                             }
                         },
                     )
-                    .map_err(|error| error.to_string());
+                } else {
+                    client.send_turns_blocking_cancellable(
+                        Some(&system),
+                        &request_history,
+                        &worker_token,
+                    )
+                }
+                .map_err(|error| error.to_string());
                 if worker_token.is_cancelled() {
                     return;
                 }

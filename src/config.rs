@@ -120,6 +120,14 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub ai_redact_secrets: bool,
 
+    /// Stream AI panel replies as they generate (default on). Turning this off
+    /// sends one blocking request instead — the escape hatch for an
+    /// SSE-buffering proxy or an openai-compatible endpoint that mishandles
+    /// `stream: true`, where streaming can only ever fail. anvil, forge and
+    /// frost all carry this key; keep the name identical to theirs.
+    #[serde(default = "default_true")]
+    pub ai_stream: bool,
+
     /// Explicit consent for sending semantic terminal context (command, cwd,
     /// and captured output) to a non-local AI provider. Local Ollama requests
     /// sent directly to a loopback Ollama endpoint do not require this
@@ -567,6 +575,7 @@ impl Default for Config {
             ai_max_tokens: default_ai_max_tokens(),
             ai_temperature: None,
             ai_redact_secrets: true,
+            ai_stream: true,
             ai_share_command_context: false,
             command_correction_enabled: false,
             ai_api_key_file: None,

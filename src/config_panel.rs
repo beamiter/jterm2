@@ -131,6 +131,7 @@ pub struct ConfigPanel {
     /// 温度草稿：空串 = 用 provider 默认。
     edit_ai_temperature: String,
     edit_ai_redact_secrets: bool,
+    edit_ai_stream: bool,
     edit_ai_share_command_context: bool,
     edit_command_correction_enabled: bool,
     /// Configured credential path retained for hand-edited configs. The UI
@@ -199,6 +200,7 @@ impl ConfigPanel {
             edit_ai_max_tokens: 1_024,
             edit_ai_temperature: String::new(),
             edit_ai_redact_secrets: true,
+            edit_ai_stream: true,
             edit_ai_share_command_context: false,
             edit_command_correction_enabled: false,
             edit_ai_api_key_file: String::new(),
@@ -293,6 +295,7 @@ impl ConfigPanel {
             .map(|t| format!("{t}"))
             .unwrap_or_default();
         self.edit_ai_redact_secrets = config.ai_redact_secrets;
+        self.edit_ai_stream = config.ai_stream;
         self.edit_ai_share_command_context = config.ai_share_command_context;
         self.edit_command_correction_enabled = config.command_correction_enabled;
         self.edit_ai_api_key_file = config.ai_api_key_file.clone().unwrap_or_default();
@@ -349,6 +352,7 @@ impl ConfigPanel {
             .ok()
             .filter(|t| t.is_finite() && (0.0..=2.0).contains(t));
         config.ai_redact_secrets = self.edit_ai_redact_secrets;
+        config.ai_stream = self.edit_ai_stream;
         config.ai_share_command_context = self.edit_ai_share_command_context;
         config.command_correction_enabled = self.edit_command_correction_enabled;
         config.ai_api_key_file =
@@ -1241,6 +1245,21 @@ impl ConfigPanel {
             .checkbox(
                 &mut self.edit_ai_redact_secrets,
                 "Redact secrets in attached command context",
+            )
+            .changed()
+        {
+            self.has_changes = true;
+        }
+
+        if ui
+            .checkbox(
+                &mut self.edit_ai_stream,
+                "Stream AI replies as they generate",
+            )
+            .on_hover_text(
+                "Turn this off behind a proxy that buffers server-sent events, or \
+                 for an endpoint that mishandles stream: true — replies then \
+                 arrive in one piece instead of never arriving.",
             )
             .changed()
         {
