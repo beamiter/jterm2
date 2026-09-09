@@ -2230,7 +2230,7 @@ mod tests {
         );
         assert!(compatibility
             .output
-            .starts_with(crate::agent::context::UNKNOWN_EXIT_STATUS_NOTE));
+            .starts_with(&crate::agent::context::unknown_exit_status_note()));
         assert_eq!(
             attached_exit_status(panel.source_context.as_ref(), compatibility),
             None,

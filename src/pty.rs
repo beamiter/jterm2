@@ -2,123 +2,14 @@ use anyhow::{anyhow, Result};
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
 
-#[cfg(unix)]
-pub(crate) struct PinnedDirectory(std::fs::File);
-
-#[cfg(unix)]
-impl std::fmt::Debug for PinnedDirectory {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use std::os::fd::AsRawFd;
-        formatter
-            .debug_tuple("PinnedDirectory")
-            .field(&self.0.as_raw_fd())
-            .finish()
-    }
-}
-
-#[cfg(unix)]
-impl PinnedDirectory {
-    pub(crate) fn open(path: &std::path::Path) -> Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let directory = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|error| {
-                anyhow!(
-                    "cannot pin validation directory {}: {error}",
-                    path.display()
-                )
-            })?;
-        if !directory
-            .metadata()
-            .map_err(|error| {
-                anyhow!(
-                    "cannot inspect pinned validation directory {}: {error}",
-                    path.display()
-                )
-            })?
-            .is_dir()
-        {
-            return Err(anyhow!(
-                "validation working directory is not a directory: {}",
-                path.display()
-            ));
-        }
-        Ok(Self(directory))
-    }
-
-    pub(crate) fn proc_path(&self) -> std::path::PathBuf {
-        use std::os::fd::AsRawFd;
-        std::path::PathBuf::from(format!("/proc/self/fd/{}", self.0.as_raw_fd()))
-    }
-
-    /// Open a descendant directory without ever resolving a pathname from the
-    /// process root. Each component is resolved relative to an already-open
-    /// parent descriptor and rejects symlinks, `..`, and absolute paths.
-    ///
-    /// This closes the canonicalize-then-open race for nested task working
-    /// directories: replacing an ancestor with a symlink can no longer move
-    /// the returned capability outside `self`.
-    pub(crate) fn open_beneath(&self, relative: &std::path::Path) -> Result<Self> {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        use std::os::unix::ffi::OsStrExt;
-        use std::path::Component;
-
-        if relative.is_absolute() {
-            return Err(anyhow!(
-                "cannot pin absolute descendant directory {}",
-                relative.display()
-            ));
-        }
-
-        let mut directory = self
-            .0
-            .try_clone()
-            .map_err(|error| anyhow!("cannot clone pinned directory: {error}"))?;
-        for component in relative.components() {
-            let name = match component {
-                Component::CurDir => continue,
-                Component::Normal(name) => name,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(anyhow!(
-                        "descendant directory contains an unsafe component: {}",
-                        relative.display()
-                    ));
-                }
-            };
-            let name = CString::new(name.as_bytes()).map_err(|_| {
-                anyhow!(
-                    "descendant directory contains a NUL byte: {}",
-                    relative.display()
-                )
-            })?;
-            let fd = unsafe {
-                libc::openat(
-                    directory.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                )
-            };
-            if fd < 0 {
-                return Err(anyhow!(
-                    "cannot pin descendant directory {}: {}",
-                    relative.display(),
-                    std::io::Error::last_os_error()
-                ));
-            }
-            // SAFETY: `openat` returned a new owned descriptor on success.
-            directory = unsafe { std::fs::File::from_raw_fd(fd) };
-        }
-        Ok(Self(directory))
-    }
-
-    pub(crate) fn as_raw_fd(&self) -> RawFd {
-        use std::os::fd::AsRawFd;
-        self.0.as_raw_fd()
-    }
-}
+/// The descriptor-pinning capability now lives in
+/// [`jterm_core::agent_task::pinned_dir`], which is where the agent-task
+/// runtime that needs it moved. This crate keeps the name it always used.
+///
+/// The only change is the error type: core returns `String` so the module
+/// carries no error-library dependency, and every consumer here already
+/// stringified these messages into its own domain error.
+pub(crate) use jterm_core::agent_task::pinned_dir::PinnedDirectory;
 
 /// PTY 读取结果。流关闭与子进程退出必须分开判断：Linux 的 EIO/Hangup
 /// 只说明当前没有 slave fd，子进程仍可能存活；只有 waitpid 才能确认退出。
